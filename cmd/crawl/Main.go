@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/jakib01/web-crawiling-golang-colly/internal/crawler/adidas"
 	"os"
 
 	"github.com/jmoiron/sqlx"
@@ -56,11 +57,17 @@ func main() {
 	}
 	defer db.Close()
 
-	// ─── Run scheduler ─────────────────────────────────────────
-	sched := crawler.NewScheduler(db, cfg.Crawler)
-	if err := sched.Run(context.Background(), *limit); err != nil {
+	// ─── Connect to DB ─────────────────────────────────────────
+	c := adidas.NewAdidasCrawler(db, sugar)
+	products, err := c.CrawlProducts(*limit)
+	if err != nil {
 		sugar.Fatalf("crawl failed: %v", err)
 	}
 
-	sugar.Info("Crawl completed successfully")
+	repo := postgres.NewProductRepository(db)
+	if err := repo.BulkInsert(products); err != nil {
+		sugar.Fatalf("insert failed: %v", err)
+	}
+
+	sugar.Infof("✅ Successfully crawled and stored %d products", len(products))
 }
