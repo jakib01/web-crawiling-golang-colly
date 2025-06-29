@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"github.com/jakib01/web-crawiling-golang-colly/internal/crawler/adidas"
@@ -11,8 +10,8 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/jakib01/web-crawiling-golang-colly/internal/config"
-	"github.com/jakib01/web-crawiling-golang-colly/internal/crawler"
 	"github.com/jakib01/web-crawiling-golang-colly/internal/logger"
+	"github.com/jakib01/web-crawiling-golang-colly/internal/repository/postgres"
 )
 
 func main() {
