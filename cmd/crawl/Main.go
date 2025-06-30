@@ -11,7 +11,7 @@ import (
 
 	"github.com/jakib01/web-crawiling-golang-colly/internal/config"
 	"github.com/jakib01/web-crawiling-golang-colly/internal/logger"
-	"github.com/jakib01/web-crawiling-golang-colly/internal/repository/postgres"
+	//"github.com/jakib01/web-crawiling-golang-colly/internal/repository/postgres"
 )
 
 func main() {
@@ -63,10 +63,10 @@ func main() {
 		sugar.Fatalf("crawl failed: %v", err)
 	}
 
-	repo := postgres.NewProductRepository(db)
-	if err := repo.BulkInsert(products); err != nil {
-		sugar.Fatalf("insert failed: %v", err)
-	}
+	//repo := postgres.NewProductRepository(db)
+	//if err := repo.BulkInsert(products); err != nil {
+	//	sugar.Fatalf("insert failed: %v", err)
+	//}
 
 	sugar.Infof("✅ Successfully crawled and stored %d products", len(products))
 }
