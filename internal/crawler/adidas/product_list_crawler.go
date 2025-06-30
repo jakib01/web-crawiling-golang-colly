@@ -8,10 +8,13 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/chromedp/chromedp"
+	"github.com/jakib01/web-crawiling-golang-colly/internal/model"
 	"go.uber.org/zap"
 )
 
-func collectProductURLs(limit int, logger *zap.SugaredLogger) ([]string, error) {
+const step = 48
+
+func collectProductURLs(limit int, logger *zap.SugaredLogger) ([]model.ProductURL, error) {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
 		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"),
@@ -26,14 +29,14 @@ func collectProductURLs(limit int, logger *zap.SugaredLogger) ([]string, error) 
 	ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	productURLs := map[string]bool{}
+	productMap := map[string]bool{}
+	var productList []model.ProductURL
 	start := 0
-	step := 48
 
-	for len(productURLs) < limit {
+	for len(productList) < limit {
 		pageURL := "https://www.adidas.jp/メンズ"
 		if start > 0 {
-			pageURL = fmt.Sprintf("https://www.adidas.jp/メンズ?start=%d", start)
+			pageURL = fmt.Sprintf("%s?start=%d", pageURL, start)
 		}
 
 		var html string
@@ -53,22 +56,42 @@ func collectProductURLs(limit int, logger *zap.SugaredLogger) ([]string, error) 
 			break
 		}
 
-		foundOnPage := 0
-		doc.Find("a[href$='.html']").Each(func(i int, s *goquery.Selection) {
+		found := 0
+		doc.Find("a[href$='.html']").Each(func(_ int, s *goquery.Selection) {
 			href, exists := s.Attr("href")
-			if exists && strings.HasSuffix(href, ".html") && strings.Count(href, "/") == 2 {
-				fullURL := "https://www.adidas.jp" + href
-				if !productURLs[fullURL] {
-					productURLs[fullURL] = true
-					foundOnPage++
-					if len(productURLs) >= limit {
-						return
-					}
-				}
+			if !exists || strings.Count(href, "/") != 2 || !strings.HasSuffix(href, ".html") {
+				return
+			}
+
+			fullURL := "https://www.adidas.jp" + href
+			if productMap[fullURL] {
+				return
+			}
+
+			// ✅ Extract code from last segment of path
+			parts := strings.Split(href, "/")
+			code := strings.TrimSuffix(parts[len(parts)-1], ".html")
+
+			imgURL := ""
+			if img := s.Find("img"); img.Length() > 0 {
+				imgURL, _ = img.Attr("src")
+			}
+
+			productList = append(productList, model.ProductURL{
+				Code:      code,
+				URL:       fullURL,
+				ImageURL:  imgURL,
+				ScrapedAt: time.Now(),
+			})
+			productMap[fullURL] = true
+			found++
+
+			if len(productList) >= limit {
+				return
 			}
 		})
 
-		if foundOnPage == 0 {
+		if found == 0 {
 			logger.Info("No more products found. Ending pagination.")
 			break
 		}
@@ -76,9 +99,5 @@ func collectProductURLs(limit int, logger *zap.SugaredLogger) ([]string, error) 
 		start += step
 	}
 
-	var urls []string
-	for url := range productURLs {
-		urls = append(urls, url)
-	}
-	return urls, nil
+	return productList, nil
 }

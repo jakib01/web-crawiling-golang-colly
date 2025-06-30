@@ -6,12 +6,13 @@ import (
 	"github.com/jakib01/web-crawiling-golang-colly/internal/crawler/adidas"
 	"os"
 
-	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 
 	"github.com/jakib01/web-crawiling-golang-colly/internal/config"
 	"github.com/jakib01/web-crawiling-golang-colly/internal/logger"
 	//"github.com/jakib01/web-crawiling-golang-colly/internal/repository/postgres"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -40,23 +41,22 @@ func main() {
 
 	// ─── Build DB connection string ───────────────────────────
 	dsn := fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		"host=%s user=%s password=%s dbname=%s port=%d sslmode=%s",
+		cfg.DBHost,
 		cfg.DBUser,
 		cfg.DBPassword,
-		cfg.DBHost,
-		cfg.DBPort,
 		cfg.DBName,
+		cfg.DBPort,
 		cfg.DBSSLMode,
 	)
 
-	// ─── Connect to DB ─────────────────────────────────────────
-	db, err := sqlx.Connect("postgres", dsn)
+	// ─── Connect to DB (GORM) ─────────────────────────────────
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		sugar.Fatalf("db connection failed: %v", err)
 	}
-	defer db.Close()
 
-	// ─── Connect to DB ─────────────────────────────────────────
+	// ─── Start crawl ──────────────────────────────────────────
 	c := adidas.NewAdidasCrawler(db, sugar)
 	products, err := c.CrawlProducts(*limit)
 	if err != nil {

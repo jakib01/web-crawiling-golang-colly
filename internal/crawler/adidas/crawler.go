@@ -1,23 +1,30 @@
 package adidas
 
 import (
-	"github.com/jmoiron/sqlx"
+	"github.com/jakib01/web-crawiling-golang-colly/internal/model"
+	"github.com/jakib01/web-crawiling-golang-colly/internal/repository/postgres"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 type AdidasCrawler struct {
-	db     *sqlx.DB
+	db     *gorm.DB
 	logger *zap.SugaredLogger
 }
 
-func NewAdidasCrawler(db *sqlx.DB, logger *zap.SugaredLogger) *AdidasCrawler {
+func NewAdidasCrawler(db *gorm.DB, logger *zap.SugaredLogger) *AdidasCrawler {
 	return &AdidasCrawler{db: db, logger: logger}
 }
 
-func (c *AdidasCrawler) CrawlProducts(limit int) ([]string, error) {
-	urls, err := collectProductURLs(limit, c.logger)
+func (c *AdidasCrawler) CrawlProducts(limit int) ([]model.ProductURL, error) {
+	products, err := collectProductURLs(limit, c.logger)
 	if err != nil {
 		return nil, err
 	}
-	return urls, nil
+
+	if err := postgres.StoreProductURLs(c.db, products); err != nil {
+		return nil, err
+	}
+
+	return products, nil
 }
