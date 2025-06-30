@@ -17,7 +17,7 @@ import (
 
 func main() {
 	envFile := flag.String("env", ".env", "path to env file")
-	limit := flag.Int("limit", 300, "max number of products to crawl")
+	limit := flag.Int("limit", 10, "max number of products to crawl")
 	flag.Parse()
 
 	// ─── Load config ───────────────────────────────────────────
