@@ -46,11 +46,43 @@ func FetchAndParseDetailPage(url string, code string) (model.Product, error) {
 
 	// Extract fields
 	name := strings.TrimSpace(doc.Find(`h1[data-auto-id="product-title"]`).Text())
-	category := doc.Find(`div[data-auto-id="product-category"] span`).Text()
 	priceStr := doc.Find(`[data-testid="main-price"] span`).Last().Text()
-	reviewCountStr := doc.Find(`button[data-auto-id="product-rating-review-count"]`).Text()
-	titleDescription := strings.TrimSpace(doc.Find("h3.subtitle___9ljbp").Text())
-	generalDescription := strings.TrimSpace(doc.Find("p.gl-vspace").First().Text())
+
+	var category, titleDescription, generalDescription string
+	reviewCount := 0
+
+	doc.Find(`script[type="application/ld+json"]`).Each(func(i int, s *goquery.Selection) {
+		var data map[string]interface{}
+		raw := strings.TrimSpace(s.Text())
+		if raw == "" || !strings.Contains(raw, `"@type"`) {
+			return
+		}
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			return
+		}
+		if data["@type"] == "Product" {
+			if val, ok := data["category"].(string); ok {
+				category = val
+			}
+			if val, ok := data["description"].(string); ok {
+				generalDescription = val
+			}
+			// optional fallback for titleDescription
+			//if titleDescription == "" {
+			//	titleDescription = val
+			//}
+		}
+	})
+
+	// fallback titleDescription from DOM if available
+	if domTitle := strings.TrimSpace(doc.Find("h3").First().Text()); domTitle != "" {
+		titleDescription = domTitle
+	}
+
+	// reviewCount fallback from DOM
+	if reviewStr := strings.TrimSpace(doc.Find(`button[data-auto-id="product-rating-review-count"]`).Text()); reviewStr != "" {
+		reviewCount, _ = strconv.Atoi(strings.Trim(reviewStr, "件のレビュー "))
+	}
 
 	// Parse price (¥16,500 → 16500.00)
 	priceYen := 0.0
@@ -58,12 +90,6 @@ func FetchAndParseDetailPage(url string, code string) (model.Product, error) {
 		cleaned := strings.ReplaceAll(priceStr, "¥", "")
 		cleaned = strings.ReplaceAll(cleaned, ",", "")
 		priceYen, _ = strconv.ParseFloat(cleaned, 64)
-	}
-
-	// Parse reviews (e.g. "2" → 2)
-	totalReviews := 0
-	if reviewCountStr != "" {
-		totalReviews, _ = strconv.Atoi(reviewCountStr)
 	}
 
 	// Fetch sizes via API
@@ -96,7 +122,7 @@ func FetchAndParseDetailPage(url string, code string) (model.Product, error) {
 		Category:                   category,
 		PriceYen:                   priceYen,
 		SenseOfSize:                "",
-		TotalReviews:               totalReviews,
+		TotalReviews:               reviewCount,
 		DetailsURL:                 url,
 		TitleDescription:           titleDescription,
 		GeneralDescription:         generalDescription,
