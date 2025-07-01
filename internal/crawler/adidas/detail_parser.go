@@ -3,8 +3,6 @@ package adidas
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -92,16 +90,27 @@ func FetchAndParseDetailPage(url string, code string) (model.Product, error) {
 		priceYen, _ = strconv.ParseFloat(cleaned, 64)
 	}
 
-	// Fetch sizes via API
-	sizes, _ := FetchProductSizes(code) // handle error optionally
+	sizes, err := ExtractProductSizes(ctx)
+	if err != nil {
+		return model.Product{}, fmt.Errorf("extract sizes failed: %w", err)
+	}
 
 	// Extract reviews
-	reviews := ExtractReviews(doc)
+	reviews, err := ExtractReviews(ctx)
+	if err != nil {
+		return model.Product{}, fmt.Errorf("extract reviews failed: %w", err)
+	}
 
 	// Extract reviews
-	aspectRatings := ExtractAspectRatings(doc)
+	aspectRatings, err := ExtractAspectRatings(ctx)
+	if err != nil {
+		return model.Product{}, fmt.Errorf("extract aspectRatings failed: %w", err)
+	}
 
-	coordinatedItems := ExtractCoordinatedItems(doc)
+	coordinatedItems, err := ExtractCoordinatedItems(doc)
+	if err != nil {
+		return model.Product{}, fmt.Errorf("extract coordinatedItems failed: %w", err)
+	}
 
 	// Extract product images
 	var images []model.ProductImage
@@ -116,7 +125,7 @@ func FetchAndParseDetailPage(url string, code string) (model.Product, error) {
 		})
 	})
 
-	return model.Product{
+	var data = model.Product{
 		ProductCode:                code,
 		Name:                       name,
 		Category:                   category,
@@ -133,131 +142,184 @@ func FetchAndParseDetailPage(url string, code string) (model.Product, error) {
 		Images:                     images,
 		AspectRatings:              aspectRatings,
 		Coordinated:                coordinatedItems,
-	}, nil
+	}
+	return data, nil
 }
 
-func FetchProductSizes(code string) ([]model.ProductSize, error) {
-	apiURL := fmt.Sprintf("https://www.adidas.jp/api/products/%s/availability", code)
-
-	resp, err := http.Get(apiURL)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+func ExtractProductSizes(ctx context.Context) ([]model.ProductSize, error) {
+	// Wait for the size-selector section to become visible
+	if err := chromedp.Run(ctx,
+		chromedp.WaitVisible(`div.size-selector___2kfnl`, chromedp.ByQuery),
+		chromedp.Sleep(1*time.Second),
+	); err != nil {
+		return nil, fmt.Errorf("size container not visible: %w", err)
 	}
 
-	var data struct {
-		VariationList []struct {
-			Size         string  `json:"size"`
-			Availability float64 `json:"availability"`
-		} `json:"variation_list"`
+	// Pull all span texts under the sizes container, filtering out placeholder 'AAA'
+	var labels []string
+	js := `
+        Array.from(
+            document.querySelectorAll('div.sizes___2jQjF .gl-label span')
+        ).map(el => el.textContent.trim())
+         .filter(lbl => lbl && lbl !== 'AAA')
+    `
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(js, &labels),
+	); err != nil {
+		return nil, fmt.Errorf("evaluate size labels error: %w", err)
 	}
 
-	if err := json.Unmarshal(body, &data); err != nil {
-		return nil, err
+	if len(labels) == 0 {
+		return nil, fmt.Errorf("no sizes found in DOM via JS")
 	}
 
-	var sizes []model.ProductSize
-	for _, v := range data.VariationList {
-		sizes = append(sizes, model.ProductSize{
-			ProductID:         0,
-			SizeLabel:         v.Size,
-			Availability:      v.Availability,
-			ChestCM:           0.0,
-			BackLengthCM:      0.0,
-			OtherMeasurements: "",
-			SpecialFunctions:  "",
-		})
+	sizes := make([]model.ProductSize, len(labels))
+	for i, lbl := range labels {
+		sizes[i] = model.ProductSize{
+			ProductID:    0,
+			SizeLabel:    lbl,
+			Availability: 1,
+		}
 	}
-
 	return sizes, nil
 }
 
-func ExtractReviews(doc *goquery.Document) []model.Review {
+func ExtractReviews(ctx context.Context) ([]model.Review, error) {
+	// Expand the reviews accordion
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`div[data-testid="accordion"] button.accordion__header___3Pii5`, chromedp.ByQuery),
+		chromedp.Sleep(500*time.Millisecond),
+	); err != nil {
+		return nil, fmt.Errorf("accordion click error: %w", err)
+	}
+
+	// JS snippet to extract reviews
+	js := `
+        Array.from(
+          document.querySelectorAll('div[data-auto-id="single-review-mobile"]')
+        ).map(div => {
+          const masks = Array.from(div.querySelectorAll('.gl-star-rating__mask')).map(m => parseFloat(m.style.width));
+          const rating = masks.length ? (masks.reduce((a,b)=>a+b,0)/masks.length)/20 : 0;
+          const dateEl = div.querySelector('.review-date___sEaVk');
+          const dateText = dateEl ? dateEl.textContent.trim().replace('年','-').replace('月','-').replace('日','') : '';
+          const titleEl = div.querySelector('.review-title___1382M strong');
+          const bodyEl = div.querySelector('.review-description___21UXW .clamped___3Fp2g');
+          const userEl = div.querySelector('.user-name___1n05v');
+          const votes = div.querySelectorAll('.votes___3Q6JI span');
+          const helpful = votes.length>1 ? votes[1].textContent.trim() : '';
+          return {
+            Title: titleEl? titleEl.textContent.trim() : '',
+            Body: bodyEl? bodyEl.textContent.trim() : '',
+            DateText: dateText,
+            Rating: rating,
+            UserName: userEl? userEl.textContent.trim(): '',
+            Helpful: helpful
+          };
+        })
+    `
+	var raw []struct {
+		Title    string
+		Body     string
+		DateText string
+		Rating   float64
+		UserName string
+		Helpful  string
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &raw)); err != nil {
+		return nil, fmt.Errorf("evaluate reviews JS error: %w", err)
+	}
+
 	var reviews []model.Review
-
-	doc.Find(`[data-auto-id="review"]`).Each(func(i int, s *goquery.Selection) {
-		title := strings.TrimSpace(s.Find(`.title___`).Text())
-		reviewDate := strings.TrimSpace(s.Find(`.date`).Text())
-		body := strings.TrimSpace(s.Find(`.text___`).Text())
-
-		// Count .gl-star-rating__item under the review's .gl-star-rating container
-		rating := s.Find(".gl-star-rating .gl-star-rating__item").Length()
-		parsedDate, err := time.Parse("2006年1月2日", reviewDate)
-		if err != nil {
-			parsedDate = time.Time{}
-		}
-
+	for _, r := range raw {
+		t, _ := time.Parse("2006-1-2", r.DateText)
 		reviews = append(reviews, model.Review{
-			Title:         title,
-			ReviewDate:    parsedDate,
-			Rating:        float64(rating),
-			OverallRating: 0, // As per your input
-			Body:          body,
+			Title:      r.Title,
+			Body:       r.Body,
+			Rating:     r.Rating,
+			ReviewDate: t,
 		})
-	})
-
-	return reviews
+	}
+	return reviews, nil
 }
 
-func ExtractAspectRatings(doc *goquery.Document) []model.ReviewAspectRating {
-	var aspectRatings []model.ReviewAspectRating
+// ExtractAspectRatings scrapes aspect ratings from the expanded review section via Chromedp.
+func ExtractAspectRatings(ctx context.Context) ([]model.ReviewAspectRating, error) {
+	// 1) Expand the reviews accordion if it's collapsed
+	if err := chromedp.Run(ctx,
+		chromedp.Click(`div[data-testid="accordion"] button.accordion__header___3Pii5`, chromedp.ByQuery),
+		chromedp.Sleep(300*time.Millisecond),
+	); err != nil {
+		return nil, fmt.Errorf("accordion click error: %w", err)
+	}
 
-	doc.Find(".gl-comparison-bar").Each(func(i int, s *goquery.Selection) {
-		aspect := strings.TrimSpace(s.Find(".gl-comparison-bar__title strong").Text())
+	// 2) JS snippet to read each comparison bar
+	js := `
+      Array.from(
+        document.querySelectorAll('.sub-ratings___1pAhV .gl-comparison-bar')
+      ).map(bar => {
+        const aspect = bar.querySelector('.gl-comparison-bar__title strong')?.textContent.trim() || '';
+        const style = bar.querySelector('.gl-comparison-bar__indicator')?.getAttribute('style') || '';
+        const m = style.match(/left:\s*(\d+(?:\.\d+)?)%/);
+        const pct = m ? parseFloat(m[1]) : 0;
+        return { Aspect: aspect, Rating: pct };
+      });
+    `
+	var raw []struct {
+		Aspect string
+		Rating float64
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &raw)); err != nil {
+		return nil, fmt.Errorf("evaluate aspects JS error: %w", err)
+	}
 
-		// Get "left: 62.5%;" from style attribute
-		style, exists := s.Find(".gl-comparison-bar__indicator").Attr("style")
-		rating := 0.0
-		if exists {
-			// Example style: transform: translateX(-62.5%); left: 62.5%;
-			if parts := strings.Split(style, "left:"); len(parts) > 1 {
-				raw := strings.TrimSpace(strings.TrimSuffix(parts[1], "%;"))
-				rating, _ = strconv.ParseFloat(raw, 64)
-			}
-		}
-
-		aspectRatings = append(aspectRatings, model.ReviewAspectRating{
-			ReviewID: 0, // placeholder, assign after DB insert or join
-			Aspect:   aspect,
-			Rating:   rating,
-		})
-	})
-
-	return aspectRatings
+	// 3) Map into your model.ReviewAspectRating
+	aspects := make([]model.ReviewAspectRating, len(raw))
+	for i, a := range raw {
+		aspects[i] = model.ReviewAspectRating{Aspect: a.Aspect, Rating: a.Rating}
+	}
+	return aspects, nil
 }
 
-func ExtractCoordinatedItems(doc *goquery.Document) []model.CoordinatedItem {
+// ExtractCoordinatedItems pulls both style‐lookbook cards and the "complete the look" product carousel
+func ExtractCoordinatedItems(doc *goquery.Document) ([]model.CoordinatedItem, error) {
 	var items []model.CoordinatedItem
 
-	doc.Find(`#gl-carousel-system-product-carousel-complete-the-look-recs-content > li`).Each(func(i int, s *goquery.Selection) {
-		productNumber, _ := s.Attr("id")
-
-		name := strings.TrimSpace(s.Find("h4._product-card-content-main__name_36dpn_83").Text())
-
-		priceStr := s.Find(`[data-testid="main-price"] span`).Last().Text()
-		priceYen := 0.0
-		if priceStr != "" {
-			clean := strings.ReplaceAll(priceStr, "¥", "")
-			clean = strings.ReplaceAll(clean, ",", "")
-			priceYen, _ = strconv.ParseFloat(clean, 64)
-		}
-
-		imageURL, _ := s.Find("img").Attr("src")
-		productPageURL, _ := s.Find("a").Attr("href")
-
+	// 1) Lookbook / style cards
+	doc.Find(`div[data-testid="styles-carousel"] a[data-testid="style-card"]`).Each(func(_ int, s *goquery.Selection) {
+		href, _ := s.Attr("href")
+		// first image in the card
+		img, _ := s.Find("span._imageWrap_1hxoi_9 img").First().Attr("src")
+		headline := strings.TrimSpace(s.Find(`[data-testid="style-card-headline"]`).Text())
+		desc := strings.TrimSpace(s.Find(`[data-testid="style-card-description"]`).Text())
 		items = append(items, model.CoordinatedItem{
-			ProductNumber:  productNumber,
-			Name:           name,
-			PriceYen:       priceYen,
-			ImageURL:       imageURL,
-			ProductPageURL: productPageURL,
+			ProductNumber:  "", // none for lookbook
+			Name:           fmt.Sprintf("%s %s", headline, desc),
+			PriceYen:       0, // no price
+			ImageURL:       img,
+			ProductPageURL: href,
 		})
 	})
 
-	return items
+	// 2) "Complete the look" product recommendations
+	doc.Find(`#gl-carousel-system-product-carousel-complete-the-look-recs-content li`).Each(func(_ int, s *goquery.Selection) {
+		id, _ := s.Attr("id")
+		card := s.Find(`a._product-card__link_o6rgp_73`)
+		href, _ := card.Attr("href")
+		img, _ := card.Find(`img`).First().Attr("src")
+		name := strings.TrimSpace(card.Find("h4").Text())
+		priceStr := strings.TrimSpace(card.Find(`[data-testid="main-price"]`).Text())
+		// clean "¥12,100" → "12100"
+		clean := strings.ReplaceAll(strings.ReplaceAll(priceStr, "¥", ""), ",", "")
+		priceVal, _ := strconv.ParseFloat(clean, 64)
+
+		items = append(items, model.CoordinatedItem{
+			ProductNumber:  id,
+			Name:           name,
+			PriceYen:       priceVal,
+			ImageURL:       img,
+			ProductPageURL: href,
+		})
+	})
+
+	return items, nil
 }
